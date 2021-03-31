@@ -1,0 +1,472 @@
+#!/bin/bash
+
+echo "#########Install MySQL 5.7 Community Server#############"
+sleep 2
+
+yum update
+yum -y remove mariadb*
+yum install -y yum-utils
+yum localinstall -y https://repo.mysql.com//mysql57-community-release-el7-11.noarch.rpm
+yum install -y mysql-community-server
+systemctl start mysqld
+systemctl enable mysqld
+
+yum install -y expect
+
+MYSQL=$(grep 'temporary password' /var/log/mysqld.log | awk '{print $11}')
+MYSQL_ROOT_PASSWORD="Leauge12$"
+#MYSQL_ROOT_PASSWORD="$(openssl rand -base64 29 | tr -d "=+/" | cut -c1-12)"
+
+  SECURE_MYSQL=$(expect -c "
+
+  set timeout 10
+  spawn mysql_secure_installation
+
+  expect \"Enter password for user root:\"
+  send \"$MYSQL\r\"
+  expect \"New password:\"
+  send \"$MYSQL_ROOT_PASSWORD\r\"
+  expect \"Re-enter new password:\"
+  send \"$MYSQL_ROOT_PASSWORD\r\"
+  expect \"Change the password for root ?\ ((Press y\|Y for Yes, any other key for No) :\"
+  send \"y\r\"
+  send \"$MYSQL\r\"
+  expect \"New password:\"
+  send \"$MYSQL_ROOT_PASSWORD\r\"
+  expect \"Re-enter new password:\"
+  send \"$MYSQL_ROOT_PASSWORD\r\"
+  expect \"Do you wish to continue with the password provided?\(Press y\|Y for Yes, any other key for No) :\"
+  send \"y\r\"
+  expect \"Remove anonymous users?\(Press y\|Y for Yes, any other key for No) :\"
+  send \"y\r\"
+  expect \"Disallow root login remotely?\(Press y\|Y for Yes, any other key for No) :\"
+  send \"n\r\"
+  expect \"Remove test database and access to it?\(Press y\|Y for Yes, any other key for No) :\"
+  send \"y\r\"
+  expect \"Reload privilege tables now?\(Press y\|Y for Yes, any other key for No) :\"
+  send \"y\r\"
+  expect eof
+  ")
+
+
+ echo "$SECURE_MYSQL"
+
+  #echo "ROOT_PASSWORD_FOR_DB": $MYSQL_ROOT_PASSWORD
+
+ # CREATE_DB=$(expect -c "
+
+ # set timeout 10
+ # spawn mysql -u root -p
+
+#expect \"password:\"
+#send \"$MYSQL_ROOT_PASSWORD\r\"
+#send \"CREATE DATABASE magentodb;\r\"
+#send \"exit;\r\"
+#expect \"Bye\"
+#expect eof
+#  ")
+#echo "$CREATE_DB"  
+
+echo "########Create database “magento“ in MySQL:##########"
+
+mysql -uroot -p$MYSQL_ROOT_PASSWORD -e "CREATE DATABASE magento"
+
+echo "########Install NGINX:##########"
+
+echo '[nginx]
+name=nginx repo
+baseurl=http://nginx.org/packages/rhel/7/$basearch/
+gpgcheck=0
+enabled=1' > /etc/yum.repos.d/nginx.repo
+
+yum clean all && yum -y install nginx
+systemctl start nginx
+systemctl enable nginx
+
+
+
+echo "#########Move default NGINX configuration to backup######"
+sleep 2
+
+mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bk
+
+echo 'user nginx;
+  
+worker_processes auto;
+
+error_log  /var/log/nginx/error.log warn;
+  
+pid       /var/run/nginx.pid;
+  
+# Load dynamic modules. See /usr/share/nginx/README.dynamic.
+  
+include /usr/share/nginx/modules/*.conf;
+  
+events {
+  worker_connections 1024;
+}
+  
+http {
+  include        /etc/nginx/mime.types;
+  default_type   application/octet-stream;
+  log_format     main '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+  access_log  /var/log/nginx/access.log  main;
+  log_format combined_ssl '$remote_addr - $remote_user [$time_local] '
+                          '$ssl_protocol/$ssl_cipher '
+                          '"$request" $status $body_bytes_sent '
+                          '"$http_referer" "$http_user_agent"';
+  sendfile            on;
+  tcp_nopush          on;
+  tcp_nodelay         on;
+  keepalive_timeout   120;
+  keepalive_requests  100;
+  types_hash_max_size 2048;
+  client_max_body_size 100m;
+  
+  #Enable Compression
+  gzip on;
+  gzip_disable "msie6";
+  gzip_vary on;
+  gzip_proxied any;
+  gzip_comp_level 6;
+  gzip_buffers 16 8k;
+  gzip_http_version 1.1;
+  gzip_types text/css text/plain text/xml text/x-component text/javascript application/x-javascript application/javascript application/json application/xml application/xhtml+xml application/x-font-ttf application/x-font-opentype application/x-font-truetype image/svg+xml image/x-icon image/vnd.microsoft.icon font/ttf font/eot font/otf font/opentype;
+  
+  include /etc/nginx/conf.d/*.conf;
+   
+  
+#Comment out ServerTokens OS
+  server_tokens off;
+  
+  #Prevent ClickJacking Attacks
+  add_header X-Frame-Options SAMEORIGIN;
+  
+  #Load Balancer/Reverse Proxy Header
+  real_ip_header X-Forwarded-For;
+  set_real_ip_from 0.0.0.0/0;
+}' > /etc/nginx/nginx.conf
+
+systemctl restart nginx
+
+echo 'server{
+        server_name 18.206.13.60;
+
+        root /opt/magento2/pub;
+
+        set $MAGE_ROOT /opt/magento2;
+
+        index index.php;
+        autoindex off;
+        charset UTF-8;
+        error_page 404 403 = /errors/404.php;
+
+# Deny access to sensitive files
+        location /.user.ini {
+                deny all;
+        }
+
+# PHP entry point for setup application
+location ~* ^/setup($|/) {
+    root /opt/magento2;
+    location ~ ^/setup/index.php {
+        fastcgi_pass   unix:/var/run/php-fpm/magento.sock;
+
+        fastcgi_param  PHP_FLAG  "session.auto_start=off \n suhosin.session.cryptua=off";
+        fastcgi_param  PHP_VALUE "memory_limit=756M \n max_execution_time=600";
+        fastcgi_read_timeout 600s;
+        fastcgi_connect_timeout 600s;
+
+        fastcgi_index  index.php;
+        fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;
+        include        fastcgi_params;
+    }
+
+    location ~ ^/setup/(?!pub/). {
+        deny all;
+    }
+
+    location ~ ^/setup/pub/ {
+        add_header X-Frame-Options "SAMEORIGIN";
+    }
+}
+
+# PHP entry point for update application
+location ~* ^/update($|/) {
+    root /opt/magento2;
+
+        location ~ ^/update/index.php {
+        fastcgi_split_path_info ^(/update/index.php)(/.+)$;
+        fastcgi_pass   unix:/var/run/php-fpm/magento.sock;
+        fastcgi_index  index.php;
+        fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;
+        fastcgi_param  PATH_INFO        $fastcgi_path_info;
+        include        fastcgi_params;
+    }
+
+    # Deny everything but index.php
+    location ~ ^/update/(?!pub/). {
+        deny all;
+    }
+
+    location ~ ^/update/pub/ {
+        add_header X-Frame-Options "SAMEORIGIN";
+    }
+}
+
+location / {
+    try_files $uri $uri/ /index.php$is_args$args;
+}
+
+location /pub/ {
+    location ~ ^/pub/media/(downloadable|customer|import|custom_options|theme_customization/.*\.xml) {
+        deny all;
+    }
+    alias $MAGE_ROOT/pub/;
+    add_header X-Frame-Options "SAMEORIGIN";
+}
+
+location /static/ {
+    # Uncomment the following line in production mode
+    # expires max;
+
+    # Remove signature of the static files that is used to overcome the browser cache
+    location ~ ^/static/version {
+        rewrite ^/static/(version\d*/)?(.*)$ /static/$2 last;
+    }
+
+    location ~* \.(ico|jpg|jpeg|png|gif|svg|js|css|swf|eot|ttf|otf|woff|woff2|html|json)$ {
+        add_header Cache-Control "public";
+        add_header X-Frame-Options "SAMEORIGIN";
+        expires +1y;
+
+        if (!-f $request_filename) {
+            rewrite ^/static/(version\d*/)?(.*)$ /static.php?resource=$2 last;
+        }
+    }
+    location ~* \.(zip|gz|gzip|bz2|csv|xml)$ {
+        add_header Cache-Control "no-store";
+        add_header X-Frame-Options "SAMEORIGIN";
+        expires    off;
+
+        if (!-f $request_filename) {
+           rewrite ^/static/(version\d*/)?(.*)$ /static.php?resource=$2 last;
+        }
+    }
+    if (!-f $request_filename) {
+        rewrite ^/static/(version\d*/)?(.*)$ /static.php?resource=$2 last;
+    }
+    add_header X-Frame-Options "SAMEORIGIN";
+}
+
+location /media/ {
+
+## The following section allows to offload image resizing from Magento instance to the Nginx.
+## Catalog image URL format should be set accordingly.
+## See https://docs.magento.com/user-guide/configuration/general/web.html#url-options
+#   location ~* ^/media/catalog/.* {
+#
+#       # Replace placeholders and uncomment the line below to serve product images from public S3
+#       # See examples of S3 authentication at https://github.com/anomalizer/ngx_aws_auth
+#       # resolver 8.8.8.8;
+#       # proxy_pass https://<bucket-name>.<region-name>.amazonaws.com;
+#
+#       set $width "-";
+#       set $height "-";
+#       if ($arg_width != '') {
+#           set $width $arg_width;
+#       }
+#       if ($arg_height != '') {
+#           set $height $arg_height;
+#       }
+#       image_filter resize $width $height;
+#       image_filter_jpeg_quality 90;
+#   }
+
+    try_files $uri $uri/ /get.php$is_args$args;
+
+    location ~ ^/media/theme_customization/.*\.xml {
+        deny all;
+    }
+
+    location ~* \.(ico|jpg|jpeg|png|gif|svg|js|css|swf|eot|ttf|otf|woff|woff2)$ {
+        add_header Cache-Control "public";
+        add_header X-Frame-Options "SAMEORIGIN";
+        expires +1y;
+        try_files $uri $uri/ /get.php$is_args$args;
+    }
+    location ~* \.(zip|gz|gzip|bz2|csv|xml)$ {
+        add_header Cache-Control "no-store";
+        add_header X-Frame-Options "SAMEORIGIN";
+        expires    off;
+        try_files $uri $uri/ /get.php$is_args$args;
+    }
+    add_header X-Frame-Options "SAMEORIGIN";
+    }
+
+location /media/customer/ {
+    deny all;
+}
+
+location /media/downloadable/ {
+    deny all;
+}
+
+location /media/import/ {
+    deny all;
+}
+
+location /media/custom_options/ {
+    deny all;
+}
+
+location /errors/ {
+    location ~* \.xml$ {
+        deny all;
+    }
+}
+
+# PHP entry point for main application
+location ~ ^/(index|get|static|errors/report|errors/404|errors/503|health_check)\.php$ {
+    try_files $uri =404;
+    fastcgi_pass   unix:/var/run/php-fpm/magento.sock;
+    fastcgi_buffers 16 16k;
+    fastcgi_buffer_size 32k;
+
+    fastcgi_param  PHP_FLAG  "session.auto_start=off \n suhosin.session.cryptua=off";
+    fastcgi_param  PHP_VALUE "memory_limit=756M \n max_execution_time=18000";
+    fastcgi_read_timeout 600s;
+    fastcgi_connect_timeout 600s;
+
+    fastcgi_index  index.php;
+    fastcgi_param  SCRIPT_FILENAME  $document_root$fastcgi_script_name;
+    include        fastcgi_params;
+}
+
+gzip on;
+gzip_disable "msie6";
+
+gzip_comp_level 6;
+gzip_min_length 1100;
+gzip_buffers 16 8k;
+gzip_proxied any;
+gzip_types
+    text/plain
+    text/css
+    text/js
+    text/xml
+    text/javascript
+        application/javascript
+    application/x-javascript
+    application/json
+    application/xml
+    application/xml+rss
+    image/svg+xml;
+gzip_vary on;
+
+# Banned locations (only reached if the earlier PHP entry point regexes dont match)
+location ~* (\.php$|\.phtml$|\.htaccess$|\.git) {
+    deny all;
+}
+}' > /etc/nginx/conf.d/magento-new.conf
+
+echo "#######Install PHP, PHP-FPM and configure php.ini:#########"
+sleep 2
+
+amazon-linux-extras install -y epel
+amazon-linux-extras install -y php7.3
+yum -y install php-gd php-soap php-mbstring php-ldap php-imagick php-xml php-pecl-apcu php-opcache libc-client-devel php-devel uw-imap-static libxml2-devel php-bcmath certbot python2-certbot-nginx php-posix
+yum -y install php-intl.x86_64
+yum -y groupinstall "Development Tools"
+systemctl start php-fpm
+systemctl enable php-fpm
+
+sed -i '/short_open_tag = Off/c\short_open_tag = On' /etc/php.ini
+sed -i '/post_max_size = 8M/c\post_max_size = 24M' /etc/php.ini
+sed -i '/upload_max_filesize = 2M/c\upload_max_filesize = 24M' /etc/php.ini
+sed -i '/;date.timezone =/c\date.timezone = America/New_York' /etc/php.ini
+sed -i '/expose_php = On/c\expose_php = Off' /etc/php.ini
+sed -i '/;opcache.enable_cli=0/c\opcache.enable_cli=1' /etc/php.d/10-opcache.ini
+sed -i '/opcache.max_accelerated_files=4000/c\opcache.max_accelerated_files=10000' /etc/php.d/10-opcache.ini
+sed -i '/;opcache.max_wasted_percentage=5/c\opcache.max_wasted_percentage=5' /etc/php.d/10-opcache.ini
+sed -i '/;opcache.use_cwd=1/c\opcache.use_cwd=1' /etc/php.d/10-opcache.ini
+sed -i '/;opcache.validate_timestamps=1/c\opcache.validate_timestamps=1' /etc/php.d/10-opcache.ini
+sed -i '/;opcache.fast_shutdown=0/c\opcache.fast_shutdown=1' /etc/php.d/10-opcache.ini
+
+echo '[magento]
+user = nginx
+group = nginx
+listen = /var/run/php-fpm/magento.sock
+listen.mode = 0664
+listen.owner = nginx
+listen.group = nginx
+pm = static
+pm.max_children = 16
+pm.max_requests = 32
+ 
+php_admin_value[error_log] = /var/log/php-fpm/magento-error.log
+php_admin_flag[log_errors] = on' > /etc/php-fpm.d/magento.conf
+
+systemctl restart php-fpm
+
+echo "####### Install Libsodium: ##########"
+sleep 2
+
+cd /usr/src/
+wget https://download.libsodium.org/libsodium/releases/libsodium-1.0.18.tar.gz
+tar -zxvf libsodium-1.0.18.tar.gz
+cd libsodium*
+
+./configure
+make && make check
+make install
+make check
+yum install php-pear -y
+pecl install libsodium
+sed -i '731 i\extension=sodium.so' /etc/php.ini
+
+echo "######## DOCKER #########"
+sleep 2
+
+yum install -y docker
+systemctl start docker
+systemctl enable docker
+usermod -aG docker nginx
+systemctl restart docker
+
+echo "######## ElasticSearch #########"
+sleep 2
+
+docker run -d -p 9200:9200 -e "discovery.type=single-node" elasticsearch:7.11.1
+
+echo "######## Composer ########"
+sleep 2
+
+php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+php -r "if (hash_file('sha384', 'composer-setup.php') === '756890a4488ce9024fc62c56153228907f1545c228516cbf63f885e036d37e9a59d27d63f46af1d4d07ee0f76181c7d3') { echo 'Installer verified'; } else { echo 'Installer corrupt'; unlink('composer-setup.php'); } echo PHP_EOL;"
+php composer-setup.php
+php -r "unlink('composer-setup.php');"
+mv ./composer.phar /usr/bin/composer
+
+export COMPOSER_ALLOW_SUPERUSER=1;
+
+cd /opt
+git clone https://github.com/magento/magento2.git
+git checkout 2.4
+cd /opt/magento2 && composer install
+
+bin/magento setup:install --base-url=http://18.206.13.60/ \
+--db-host=localhost --db-name=magento --db-user=root --db-password='Leauge12$' \
+--admin-firstname=Magento --admin-lastname=User --admin-email=goranletic93@gmail.com \
+--admin-user=admin --admin-password=admin123 --language=en_US \
+--currency=USD --timezone=America/Chicago --use-rewrites=1 \
+--search-engine=elasticsearch7 --elasticsearch-host=localhost \
+--elasticsearch-port=9200
+
+chown -R nginx. /opt/magento2
+chmod -R 755 /opt/magento2
+
+systemctl restart nginx && systemctl restart php-fpm.service
+
